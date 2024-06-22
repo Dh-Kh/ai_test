@@ -1,96 +1,91 @@
 from fastapi import (FastAPI, Form, File, 
-                     UploadFile, HTTPException)
-from fastapi.responses import JSONResponse
+                     UploadFile, HTTPException, Request)
+from fastapi.responses import RedirectResponse, JSONResponse
+from fastapi.templating import Jinja2Templates
+from langchain import OpenAI
+from langchain.chains.summarize import load_summarize_chain
+from langchain.docstore.document import Document
 from typing import List
 from dotenv import load_dotenv
-from langchain.chains import MapReduceDocumentsChain
-from langchain.chains.llm import LLMChain
-from langchain.prompts import PromptTemplate
-from langchain_text_splitters import CharacterTextSplitter
-from langchain_openai import OpenAI
-import uvicorn
 import os
 
 load_dotenv()
 
 app = FastAPI()
 
-SMITH_API_KEY = os.getenv("LANGCHAIN_SMITH_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-llm = OpenAI(api_key=SMITH_API_KEY)
 
-"""
-The Map-Reduce method involves summarizing each document individually (map step) and then combining these summaries into a final summary (reduce step). 
-This approach is more scalable and can handle larger volumes of text.
-The map_reduce technique is designed for summarizing large documents that exceed the token limit of the language model. 
-It involves dividing the document into chunks, generating summaries for each chunk, and then combining these summaries to create a final summary. 
-This method is efficient for handling large files and significantly reduces processing time.
-"""
+templates = Jinja2Templates(directory="templates")
 
-app.post("/summarize")
+
+@app.get("/summarize/")
+async def root(request: Request):
+    return templates.TemplateResponse(
+        request=request, name="main.html"
+        )
+
+@app.post("/summarize/")
 async def summarize(
-    text: str = Form(...),
-    files: List[UploadFile] = File(...),
+    text: str = Form(None),
+    files: List[UploadFile] = File(None)
     ):
-    try:
+   try:
+        """
+        More deterministic and focused responses. (temperature=0)
+        """
         
+        llm = OpenAI(temperature=0, openai_api_key=os.getenv("OPENAI_API_KEY"))
+
         final_text: str = ""
+        
+        if text:
+            final_text += f" {text}"
         
         if files:
             files_storage: List = []
             for file in files:
                 file_data = await file.read()
                 files_storage.append(file_data.decode("utf-8"))
-            final_text += "\n".join(files_storage)
-            
-        if text:
-            final_text += f"\n{text}"
-        
-        text_splitter = CharacterTextSplitter.from_tiktoken_encoder(
-            chunk_size=1000, chunk_overlap=0
-            )
-        
-        split_docs = text_splitter.split_text(final_text)
-        
-        map_template = f"""
-        The following is a set of text
-        {final_text}
-        Based on this text, please identify the main themes 
+            final_text += " ".join(files_storage)
+
+        if not final_text:
+            return JSONResponse(content={
+                "result": None
+            })
+                
+        """
+        Document loaders provide a "load" method for loading data as documents from a configured source.
         """
         
-        reduce_template = f"""
-        The following is set of summaries:
-        {final_text}
-        Take these and distill it into a final, consolidated summary of the main themes. 
+        document = Document(page_content=final_text)
+        
+        """
+        The Map-Reduce method involves summarizing each document individually (map step) and then combining these summaries into a final summary (reduce step). 
+        This approach is more scalable and can handle larger volumes of text.
+        The map_reduce technique is designed for summarizing large documents that exceed the token limit of the language model. 
+        It involves dividing the document into chunks, generating summaries for each chunk, and then combining these summaries to create a final summary. 
+        This method is efficient for handling large files and significantly reduces processing time.
         """
         
-        map_prompt = PromptTemplate.from_template(
-            map_template
-            )
+        chain = load_summarize_chain(llm, chain_type="map_reduce")  
         
-        reduce_prompt = PromptTemplate.from_template(
-            reduce_template
-            )
-        
-        map_chain = LLMChain(llm=llm, promt=map_prompt)
-        
-        reduce_chain = LLMChain(llm=llm, promt=reduce_prompt)
-    
-        map_reduce_chain = MapReduceDocumentsChain(
-            map_chain=map_chain, 
-            reduce_chain=reduce_chain
-            )
-        
-        result = map_reduce_chain.run(split_docs)
-        
+        result = chain.run([document])
+
         return JSONResponse(content={
             "result": result
-            })
-    except HTTPException as http_e:
+        })
+    
+   except HTTPException as http_e:
         raise http_e
-    except Exception as e:
+   except Exception as e:            
         raise HTTPException(status_code=500, detail=f"{str(e)}")
+
+@app.exception_handler(404)
+async def custom_404_handler(_, __):
+    return RedirectResponse("/summarize/")
 
 
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
